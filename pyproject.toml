@@ -1,0 +1,101 @@
+[build-system]
+requires = ["setuptools>=67", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# ---------------------------------------------------------------------------
+# Project metadata
+# ---------------------------------------------------------------------------
+
+[project]
+name = "fr2en"
+version = "3.0.0"
+description = "French → English Neural Machine Translation Transformer"
+readme = "README.md"
+requires-python = ">=3.10"
+
+# Core runtime deps — always installed
+dependencies = [
+    "torch>=2.2.0",
+    "sentencepiece>=0.1.99",
+    "datasets>=2.18.0",
+    "sacrebleu>=2.4.0",
+    "tqdm>=4.66.0",
+    "numpy>=1.26.0",
+]
+
+# ---------------------------------------------------------------------------
+# Optional extras
+#   pip install -e ".[train]"      — adds wandb
+#   pip install -e ".[eval]"       — adds COMET
+#   pip install -e ".[bt]"         — adds transformers (back-translation)
+#   pip install -e ".[dev]"        — adds pytest
+#   pip install -e ".[all]"        — everything
+# ---------------------------------------------------------------------------
+
+[project.optional-dependencies]
+train = ["wandb>=0.16.0"]
+eval  = ["unbabel-comet>=2.2.0"]
+bt    = ["transformers>=4.40.0"]
+lang  = ["langdetect>=1.0.9"]
+dev   = ["pytest>=8.0"]
+all   = [
+    "wandb>=0.16.0",
+    "unbabel-comet>=2.2.0",
+    "transformers>=4.40.0",
+    "langdetect>=1.0.9",
+    "pytest>=8.0",
+]
+
+# ---------------------------------------------------------------------------
+# CLI entry points
+#   After `pip install -e .` these commands are available in the shell.
+# ---------------------------------------------------------------------------
+
+[project.scripts]
+fr2en-download    = "fr2en.data.download:main"
+fr2en-preprocess  = "fr2en.data.preprocess:main"
+fr2en-tokenizer   = "fr2en.scripts.train_tokenizer:main"
+fr2en-train       = "fr2en.scripts.train:main"
+fr2en-translate   = "fr2en.inference.translate:main"
+fr2en-evaluate    = "fr2en.evaluation.evaluate:main"
+fr2en-backtranslate = "fr2en.data.back_translate:main"
+
+# ---------------------------------------------------------------------------
+# Package discovery
+#
+# The repo directory (fr2en_v3 or whatever the user clones it as) IS the
+# fr2en Python package.  We map the package name "fr2en" → "." so that
+# `import fr2en` works after a single `pip install -e .`.
+# ---------------------------------------------------------------------------
+
+[tool.setuptools]
+packages = [
+    "fr2en",
+    "fr2en.configs",
+    "fr2en.model",
+    "fr2en.data",
+    "fr2en.training",
+    "fr2en.inference",
+    "fr2en.evaluation",
+    "fr2en.scripts",
+    "fr2en.utils",
+]
+
+[tool.setuptools.package-dir]
+"fr2en"            = "."
+"fr2en.configs"    = "configs"
+"fr2en.model"      = "model"
+"fr2en.data"       = "data"
+"fr2en.training"   = "training"
+"fr2en.inference"  = "inference"
+"fr2en.evaluation" = "evaluation"
+"fr2en.scripts"    = "scripts"
+"fr2en.utils"      = "utils"
+
+# ---------------------------------------------------------------------------
+# Test configuration
+# ---------------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts   = "-v"
