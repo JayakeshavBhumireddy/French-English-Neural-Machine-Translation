@@ -59,6 +59,8 @@ fr2en-train       = "fr2en.scripts.train:main"
 fr2en-translate   = "fr2en.inference.translate:main"
 fr2en-evaluate    = "fr2en.evaluation.evaluate:main"
 fr2en-backtranslate = "fr2en.data.back_translate:main"
+fr2en-plot        = "fr2en.scripts.plot_training:main"
+fr2en-demo        = "fr2en.scripts.demo:main"
 
 # ---------------------------------------------------------------------------
 # Package discovery

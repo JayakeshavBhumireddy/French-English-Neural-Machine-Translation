@@ -157,7 +157,10 @@ class Trainer:
 
         if self.is_main and not (self.output_dir / "train_log.csv").exists():
             with open(self.output_dir / "train_log.csv", "w", newline="") as f:
-                csv.writer(f).writerow(["step", "loss", "lr", "elapsed", "device"])
+                csv.writer(f).writerow(["step", "loss", "lr", "elapsed", "device", "gpu_mem_gb"])
+        if self.is_main and not (self.output_dir / "eval_log.csv").exists():
+            with open(self.output_dir / "eval_log.csv", "w", newline="") as f:
+                csv.writer(f).writerow(["step", "bleu", "chrf", "ter", "comet", "n"])
 
         self._wandb = False
         if self.is_main and config.train.wandb_project and _WANDB_AVAILABLE:
@@ -313,6 +316,13 @@ class Trainer:
         finally:
             self.model.train()
         logger.info("Step %d | %s", self.global_step, result)
+        with open(self.output_dir / "eval_log.csv", "a", newline="") as f:
+            csv.writer(f).writerow([
+                self.global_step, f"{result.bleu:.4f}", f"{result.chrf:.4f}",
+                f"{result.ter:.4f}",
+                f"{result.comet:.4f}" if result.comet is not None else "",
+                result.n_sentences,
+            ])
         if self._wandb:
             metrics = {"eval/bleu": result.bleu, "eval/chrf": result.chrf,
                        "eval/ter": result.ter, "device": self.dev_info.name}
@@ -330,13 +340,29 @@ class Trainer:
             return
         lr = self.scheduler.get_last_lr()[0]
         elapsed = time.time() - t0
-        logger.info("step %6d | loss %.4f | lr %.2e | elapsed %.0fs | %s",
-                    self.global_step, loss, lr, elapsed, self.dev_info.device_type.upper())
+
+        gpu_mem_gb = 0.0
+        if self.device.type == "cuda":
+            gpu_mem_gb = torch.cuda.memory_allocated(self.device) / 1e9
+            gpu_reserved_gb = torch.cuda.memory_reserved(self.device) / 1e9
+            logger.info(
+                "step %6d | loss %.4f | lr %.2e | elapsed %.0fs | mem %.1f/%.1fGB | %s",
+                self.global_step, loss, lr, elapsed,
+                gpu_mem_gb, gpu_reserved_gb, self.dev_info.device_type.upper(),
+            )
+        else:
+            logger.info("step %6d | loss %.4f | lr %.2e | elapsed %.0fs | %s",
+                        self.global_step, loss, lr, elapsed, self.dev_info.device_type.upper())
+
         with open(self.output_dir / "train_log.csv", "a", newline="") as f:
             csv.writer(f).writerow([self.global_step, f"{loss:.4f}", f"{lr:.2e}",
-                                    f"{elapsed:.0f}", self.dev_info.device_type])
+                                    f"{elapsed:.0f}", self.dev_info.device_type,
+                                    f"{gpu_mem_gb:.2f}"])
         if self._wandb:
-            wandb.log({"train/loss": loss, "train/lr": lr}, step=self.global_step)
+            metrics = {"train/loss": loss, "train/lr": lr}
+            if self.device.type == "cuda":
+                metrics["train/gpu_mem_gb"] = gpu_mem_gb
+            wandb.log(metrics, step=self.global_step)
 
     # ------------------------------------------------------------------
     # Checkpointing

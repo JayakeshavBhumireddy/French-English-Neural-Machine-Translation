@@ -56,9 +56,21 @@ def main() -> None:
     parser.add_argument("--num_workers",   type=int, default=2)
     parser.add_argument("--ddp",           action="store_true")
     parser.add_argument("--compile",       action="store_true", help="torch.compile (CUDA only)")
-    parser.add_argument("--swiglu",        action="store_true", help="SwiGLU FFN")
+    parser.add_argument("--swiglu",        action="store_true", help="SwiGLU FFN (better than GELU)")
     parser.add_argument("--rope",          action="store_true", help="RoPE positional encoding")
     parser.add_argument("--grad_ckpt",     action="store_true", help="Gradient checkpointing")
+    parser.add_argument("--num_kv_heads",  type=int, default=0,
+                        help="GQA: KV heads (0=same as num_heads=standard MHA). "
+                             "E.g. --num_kv_heads 2 with base (8 heads) = 4x KV savings.")
+    parser.add_argument("--dropout",       type=float, default=None,
+                        help="Model dropout (default: 0.1). Increase to 0.2 for small datasets.")
+    parser.add_argument("--word_dropout",  type=float, default=0.0,
+                        help="Source word dropout during training (e.g. 0.1). "
+                             "Randomly replaces src tokens with UNK — cheap data augmentation.")
+    parser.add_argument("--lr_schedule",   default=None,
+                        choices=["inverse_sqrt", "cosine", "linear"],
+                        help="LR schedule (default: inverse_sqrt). "
+                             "'cosine' gives better final quality for fixed-step budgets.")
     parser.add_argument("--wandb_project", default=None)
     args = parser.parse_args()
 
@@ -81,6 +93,10 @@ def main() -> None:
             timeout=datetime.timedelta(minutes=30),
         )
         torch.cuda.set_device(local_rank)
+
+    # Tensor Cores on A40/A100/H100 perform bf16 matmuls faster with this.
+    if dev_info.device_type == "cuda":
+        torch.set_float32_matmul_precision("high")
 
     # ----------------------------------------------------------------
     # Logging
@@ -119,6 +135,12 @@ def main() -> None:
     config.model.use_swiglu              = args.swiglu
     config.model.use_rope                = args.rope
     config.model.gradient_checkpointing = args.grad_ckpt
+    if args.num_kv_heads > 0:
+        config.model.num_kv_heads = args.num_kv_heads
+    if args.dropout is not None:
+        config.model.dropout = args.dropout
+    if args.lr_schedule is not None:
+        config.train.lr_schedule = args.lr_schedule
     if args.wandb_project:
         config.train.wandb_project = args.wandb_project
 
@@ -155,6 +177,7 @@ def main() -> None:
         ddp=args.ddp and dev_info.supports_ddp,
         rank=rank, world_size=world_size,
         seed=config.train.seed,
+        word_dropout=args.word_dropout,
     )
     valid_loader = build_dataloader(
         valid_ds, tokenizer, split="validation",
