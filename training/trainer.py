@@ -81,13 +81,14 @@ class Trainer:
         # ----------------------------------------------------------------
         # Model
         # ----------------------------------------------------------------
+        # model_raw always points to the bare nn.Module — used for checkpointing
+        # and optimizer (whose param groups must reference the original tensors).
         self.model_raw = model.to(self.device)
 
-        # torch.compile — CUDA only, controlled by config (PERF)
-        if config.train.compile and self.dev_info.supports_compile:
-            logger.info("Compiling model with torch.compile ...")
-            self.model_raw = torch.compile(self.model_raw)
-
+        # DDP must wrap the bare model so its parameter verification sees the
+        # real parameter list.  torch.compile goes on top of DDP, not under it
+        # — compiling before DDP causes rank 0's OptimizedModule to expose 0
+        # parameters to _verify_param_shape_across_processes, crashing init.
         if config.train.ddp and world_size > 1 and self.dev_info.supports_ddp:
             self.model = DDP(self.model_raw, device_ids=[local_rank])
         else:
@@ -97,6 +98,11 @@ class Trainer:
                     "DDP requested but device %s does not support it. "
                     "Running single-process.", self.dev_info.name
                 )
+
+        # torch.compile — CUDA only, controlled by config (PERF)
+        if config.train.compile and self.dev_info.supports_compile:
+            logger.info("Compiling model with torch.compile ...")
+            self.model = torch.compile(self.model)
 
         self.train_loader = train_loader
         self.valid_loader = valid_loader

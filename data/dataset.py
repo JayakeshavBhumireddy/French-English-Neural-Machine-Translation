@@ -123,12 +123,18 @@ def _get_or_compute_lengths(dataset: TranslationDataset) -> List[int]:
     ]
 
     try:
-        # Write to a tmp file then rename so concurrent DDP writers never
-        # leave a partially-written cache that another rank reads mid-write.
-        tmp_path = cache_path.with_suffix(".npy.tmp")
+        # Use a per-rank tmp file so concurrent DDP writers don't race on the
+        # same path. Rank 0 wins and renames to the final name; other ranks
+        # clean up their own tmp files.
+        import torch.distributed as dist
+        rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+        tmp_path = cache_path.parent / f".lengths_cache.rank{rank}.npy.tmp"
         np.save(str(tmp_path), np.array(lengths, dtype=np.int32))
-        tmp_path.rename(cache_path)
-        logger.info("Cached sample lengths → %s", cache_path)
+        if rank == 0:
+            tmp_path.rename(cache_path)
+            logger.info("Cached sample lengths → %s", cache_path)
+        else:
+            tmp_path.unlink(missing_ok=True)
     except Exception as exc:
         logger.warning("Could not write length cache: %s", exc)
 
