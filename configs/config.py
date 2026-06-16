@@ -203,6 +203,7 @@ class Config:
         cfg = cls()
         cfg.model.embedding_dim = 128
         cfg.model.num_heads = 4
+        cfg.model.num_kv_heads = 4   # __post_init__ ran with default num_heads=8; reset here
         cfg.model.encoder_layers = 2
         cfg.model.decoder_layers = 2
         cfg.model.ffn_dim = 512
@@ -246,6 +247,7 @@ class Config:
         cfg = cls()
         cfg.model.embedding_dim = 1024
         cfg.model.num_heads = 16
+        cfg.model.num_kv_heads = 16  # __post_init__ ran with default num_heads=8; reset here
         cfg.model.encoder_layers = 12
         cfg.model.decoder_layers = 12
         cfg.model.ffn_dim = 4096
