@@ -92,19 +92,22 @@ class Trainer:
         if config.train.ddp and world_size > 1 and self.dev_info.supports_ddp:
             # _verify_param_shape_across_processes does an all_gather_object to
             # confirm all ranks have the same model.  On some RunPod nodes NCCL
-            # P2P initialisation takes >10 minutes, so this first collective
-            # times out.  We know all ranks build the same model, so patch it
-            # out.  The patch is version-agnostic (check_params_across_processes
-            # was only added in PyTorch 2.3+).
-            import torch.distributed.utils as _dutils
-            _orig = getattr(_dutils, "_verify_param_shape_across_processes", None)
+            # P2P initialisation causes this first collective to hang indefinitely.
+            # We know all ranks build the same model, so skip the check.
+            #
+            # Must patch the name inside torch.nn.parallel.distributed (where DDP
+            # lives), NOT torch.distributed.utils — Python's from-import binds a
+            # local name at import time, so patching the source module has no
+            # effect on the already-bound reference inside distributed.py.
+            import torch.nn.parallel.distributed as _ddp_mod
+            _orig = getattr(_ddp_mod, "_verify_param_shape_across_processes", None)
             if _orig is not None:
-                _dutils._verify_param_shape_across_processes = lambda *a, **kw: None
+                _ddp_mod._verify_param_shape_across_processes = lambda *a, **kw: None
             try:
                 self.model = DDP(self.model_raw, device_ids=[local_rank])
             finally:
                 if _orig is not None:
-                    _dutils._verify_param_shape_across_processes = _orig
+                    _ddp_mod._verify_param_shape_across_processes = _orig
         else:
             self.model = self.model_raw
             if config.train.ddp and not self.dev_info.supports_ddp:
