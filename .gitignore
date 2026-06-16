@@ -21,7 +21,6 @@ pip-wheel-metadata/
 *.dist-info/
 
 # Data & checkpoints (large, not committed)
-/data/
 /checkpoints/
 *.pt
 *.ckpt
