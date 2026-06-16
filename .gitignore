@@ -20,7 +20,7 @@ env/
 pip-wheel-metadata/
 *.dist-info/
 
-# Data & checkpoints (large, not committed)
+# checkpoints (large, not committed)
 /checkpoints/
 *.pt
 *.ckpt

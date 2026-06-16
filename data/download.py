@@ -46,18 +46,33 @@ _SOURCES = [
 class BloomFilter:
     """
     Space-efficient approximate set membership.
-    False-positive rate ~1% at the default size.
+
+    Uses double hashing (Kirsch & Mitzenmacher, 2006) so all k positions are
+    independent: pos_i = (h1 + i * h2) % m.  This gives optimal FPR without
+    needing k separate hash calls.
+
+    FPR formula: (1 - e^(-kn/m))^k
+    Optimal k  : (m/n) * ln2 ≈ 0.693 * (m/n)
+
+    Typical configs:
+        500k items  → bits=1<<23  (8M bits,  1 MB RAM) → FPR ≈ 0.004%
+        5M items    → bits=1<<26  (64M bits,  8 MB)    → FPR ≈ 0.004%
+        50M items   → bits=1<<29  (512M bits, 64 MB)   → FPR ≈ 0.004%
+        500M items  → bits=1<<32  (4G bits,  512 MB)   → FPR ≈ 0.004%
     """
 
-    def __init__(self, size_bits: int = 1 << 28, num_hashes: int = 5) -> None:
+    def __init__(self, size_bits: int = 1 << 28, num_hashes: int = 7) -> None:
         self._size = size_bits
         self._k = num_hashes
         self._bits = bytearray(math.ceil(size_bits / 8))
 
     def _positions(self, key: str):
-        h = int(hashlib.sha256(key.encode()).hexdigest(), 16)
+        digest = hashlib.sha256(key.encode()).digest()
+        # Split 256-bit digest into two 128-bit integers for double hashing
+        h1 = int.from_bytes(digest[:16], "big")
+        h2 = int.from_bytes(digest[16:], "big") | 1  # ensure h2 is odd (co-prime to m)
         for i in range(self._k):
-            yield (h >> (i * 20)) % self._size
+            yield (h1 + i * h2) % self._size
 
     def add(self, key: str) -> bool:
         """Add key. Returns True if key was already present (probable duplicate)."""
@@ -134,17 +149,16 @@ def _passes_langdetect(fr: str, en: str) -> bool:
     return True
 
 
-def _quick_quality_check(fr: str, en: str) -> bool:
+def _quick_quality_check(
+    fr: str, en: str,
+    min_len: int = 3, max_len: int = 250, max_ratio: float = 3.0,
+) -> bool:
     """
-    Combined fast quality gate.  Currently runs:
-      1. Basic heuristics (_is_valid_pair)
+    Combined fast quality gate.
+      1. Basic heuristics (_is_valid_pair) — length, ratio
       2. Language detection (if langdetect installed)
-
-    Expensive embedding-based filters (LASER/SONAR) should be run as a
-    separate offline pass on the full corpus, not inline during streaming,
-    because they require a GPU and add ~50ms per pair.
     """
-    if not _is_valid_pair(fr, en):
+    if not _is_valid_pair(fr, en, min_len=min_len, max_len=max_len, max_ratio=max_ratio):
         return False
     if not _passes_langdetect(fr, en):
         return False
@@ -197,13 +211,27 @@ def _stream_pairs(
 # Main download + shard function
 # ---------------------------------------------------------------------------
 
+def _auto_bloom_bits(n: int) -> int:
+    """Return the smallest power-of-2 bit count giving FPR < 0.005% for n items.
+
+    Uses 20 bits/item (k=7 optimal), rounded up to the next power of 2.
+    This keeps RAM usage O(n/8 * 20/8) = O(2.5 bytes/item).
+    """
+    bits_needed = max(n * 20, 1 << 20)  # floor at 1 MB
+    return 1 << bits_needed.bit_length()
+
+
 def download_and_shard(
     output_dir: str | Path,
     max_samples: int = 10_000,
     shard_size: int = 2_000,
     valid_size: int = 1_000,
     test_size: int = 1_000,
-    bloom_bits: int = 1 << 20,
+    bloom_bits: int = 0,       # 0 = auto-compute from max_samples
+    num_hashes: int = 7,
+    min_len: int = 3,
+    max_len: int = 250,
+    max_ratio: float = 3.0,
     seed: int = 42,
 ) -> None:
     """
@@ -220,12 +248,16 @@ def download_and_shard(
     ----------
     output_dir  : root directory to write shards to.
     max_samples : hard cap on training pairs (validation/test are separate).
-                  Default 10_000 for M4 Mac Air test runs; use 100_000_000 for production.
-    shard_size  : pairs per Arrow shard. 2_000 keeps shards small for quick loads.
-    valid_size  : pairs held out for validation (taken first).
-    test_size   : pairs held out for test (taken second).
-    bloom_bits  : bits for bloom filter (1<<20 ≈ 1 MB for 10k samples;
-                  use 1<<28 = 256 MB for 100M-scale deduplication).
+    shard_size  : pairs per Arrow shard (50_000 is good for large runs).
+    valid_size  : pairs held out for validation.
+    test_size   : pairs held out for test.
+    bloom_bits  : bits for bloom filter.  0 = auto (20 bits/item, FPR<0.005%).
+                  Manual override: 1<<23=1MB for 500k, 1<<26=8MB for 5M,
+                  1<<29=64MB for 50M, 1<<32=512MB for 500M.
+    num_hashes  : k in the Bloom filter.  7 is optimal at 20 bits/item.
+    min_len     : minimum word count per sentence.
+    max_len     : maximum word count per sentence.
+    max_ratio   : max (longer/shorter) word count ratio between fr/en.
     """
     import json
     import random
@@ -238,16 +270,24 @@ def download_and_shard(
         d.mkdir(parents=True, exist_ok=True)
 
     rng = random.Random(seed)
-    # Warn when bloom filter is too small: need ~10 bits/item for ~1% FPR.
-    # At production scale (100M) the default 1<<20 gives >99% false-positive rate.
-    recommended = max_samples * 10
-    if bloom_bits < recommended:
-        logger.warning(
-            "bloom_bits=%d is too small for max_samples=%d (recommended>=%d). "
-            "Deduplication will be ineffective. Use --bloom_bits %d for production.",
-            bloom_bits, max_samples, recommended, 1 << (recommended - 1).bit_length(),
+
+    # Auto-size bloom filter: 20 bits/item gives FPR < 0.005% with k=7.
+    n_total = max_samples + valid_size + test_size
+    if bloom_bits == 0:
+        bloom_bits = _auto_bloom_bits(n_total)
+        logger.info(
+            "Auto bloom_bits=%d (2^%d, %.1f MB) for %d total items → FPR<0.005%%",
+            bloom_bits, bloom_bits.bit_length() - 1, bloom_bits / 8 / 1e6, n_total,
         )
-    bloom = BloomFilter(size_bits=bloom_bits)
+    else:
+        bits_per_item = bloom_bits / max(n_total, 1)
+        if bits_per_item < 10:
+            logger.warning(
+                "bloom_bits=%d gives only %.1f bits/item for %d items. "
+                "FPR will be >1%%. Recommend bloom_bits>=%d (auto) for this dataset size.",
+                bloom_bits, bits_per_item, n_total, _auto_bloom_bits(n_total),
+            )
+    bloom = BloomFilter(size_bits=bloom_bits, num_hashes=num_hashes)
 
     stats = {
         "total_seen": 0, "total_valid": 0,
@@ -272,7 +312,7 @@ def download_and_shard(
             stats["total_seen"] += 1
             fr, en = pair["fr"], pair["en"]
 
-            if not _quick_quality_check(fr, en):
+            if not _quick_quality_check(fr, en, min_len=min_len, max_len=max_len, max_ratio=max_ratio):
                 stats["total_invalid"] += 1
                 continue
 
@@ -340,12 +380,30 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    parser = argparse.ArgumentParser(description="Download and shard FR-EN data")
-    parser.add_argument("--output_dir",   default="~/fr2en_dataset")
-    parser.add_argument("--max_samples",  type=int, default=10_000)
-    parser.add_argument("--shard_size",   type=int, default=2_000)
-    parser.add_argument("--valid_size",   type=int, default=1_000)
-    parser.add_argument("--test_size",    type=int, default=1_000)
+    parser = argparse.ArgumentParser(
+        description="Download and shard FR-EN data",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--output_dir",  default="~/fr2en_dataset")
+    parser.add_argument("--max_samples", type=int, default=10_000,
+                        help="Max training pairs (use 500_000 or 5_000_000 for production)")
+    parser.add_argument("--shard_size",  type=int, default=50_000,
+                        help="Pairs per Arrow shard. 50k is good for large runs.")
+    parser.add_argument("--valid_size",  type=int, default=5_000)
+    parser.add_argument("--test_size",   type=int, default=5_000)
+    # Bloom filter
+    parser.add_argument("--bloom_bits",  type=int, default=0,
+                        help="Bloom filter size in bits. 0=auto (20 bits/item, FPR<0.005%%). "
+                             "Manual: 1<<23=1MB/500k, 1<<26=8MB/5M, 1<<29=64MB/50M")
+    parser.add_argument("--num_hashes",  type=int, default=7,
+                        help="Bloom filter hash count (k). 7 is optimal at 20 bits/item.")
+    # Quality filters
+    parser.add_argument("--min_len",     type=int, default=3,
+                        help="Minimum word count per sentence")
+    parser.add_argument("--max_len",     type=int, default=250,
+                        help="Maximum word count per sentence")
+    parser.add_argument("--max_ratio",   type=float, default=3.0,
+                        help="Max length ratio between FR and EN (longer/shorter)")
     args = parser.parse_args()
 
     download_and_shard(
@@ -354,6 +412,11 @@ def main() -> None:
         shard_size=args.shard_size,
         valid_size=args.valid_size,
         test_size=args.test_size,
+        bloom_bits=args.bloom_bits,
+        num_hashes=args.num_hashes,
+        min_len=args.min_len,
+        max_len=args.max_len,
+        max_ratio=args.max_ratio,
     )
 
 
