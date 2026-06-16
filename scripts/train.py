@@ -73,11 +73,12 @@ def main() -> None:
     dev_info = get_device(local_rank)
 
     if args.ddp and world_size > 1 and dev_info.supports_ddp:
-        # 10-minute timeout: if a GPU dies on RunPod, fail fast instead of
-        # hanging for PyTorch's default 30 minutes while paying for idle GPUs.
+        # 30-minute timeout: NCCL P2P / NVLink initialisation on some RunPod
+        # instances takes 10-20 minutes on the very first collective.  We also
+        # need headroom for torch.compile's first-run kernel compilation.
         dist.init_process_group(
             backend="nccl",
-            timeout=datetime.timedelta(minutes=10),
+            timeout=datetime.timedelta(minutes=30),
         )
         torch.cuda.set_device(local_rank)
 

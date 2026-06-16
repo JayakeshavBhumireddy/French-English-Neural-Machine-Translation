@@ -90,7 +90,16 @@ class Trainer:
         # — compiling before DDP causes rank 0's OptimizedModule to expose 0
         # parameters to _verify_param_shape_across_processes, crashing init.
         if config.train.ddp and world_size > 1 and self.dev_info.supports_ddp:
-            self.model = DDP(self.model_raw, device_ids=[local_rank])
+            # check_params_across_processes=False skips the all_gather_object
+            # that verifies parameter shapes across ranks.  We know all ranks
+            # build identical models, so the check adds no safety value but
+            # triggers NCCL's first collective before NCCL P2P is fully
+            # initialised — causing a 10-minute timeout on some RunPod nodes.
+            self.model = DDP(
+                self.model_raw,
+                device_ids=[local_rank],
+                check_params_across_processes=False,
+            )
         else:
             self.model = self.model_raw
             if config.train.ddp and not self.dev_info.supports_ddp:
